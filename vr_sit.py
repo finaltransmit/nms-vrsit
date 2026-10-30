@@ -1751,7 +1751,10 @@ class VRSit(Mod):
             st.reload_requested = True
             logger.info("VR is up -> reloading VRSit to install the SteamVR hooks")
             try:
-                mod_manager._gui_reload(None, None, (self._mod_name, self.pymhf_gui))
+                if hasattr(mod_manager, "_gui_reload"):  # (pyMHF 0.2.4; 0.2.5's Reload button calls reload())
+                    mod_manager._gui_reload(None, None, (self._mod_name, self.pymhf_gui))
+                else:
+                    mod_manager.reload(self._mod_name)
             except Exception:
                 logger.exception("self-reload failed")
             return
