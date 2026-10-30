@@ -492,25 +492,121 @@ ADDRESSES = {
         "0F 58 C8 F3 0F 10 05 * * * * F3 0F 59 C0 C6 87 ? ? ? ? 00 0F 2F C8",
         "F3 0F 10 05 * * * * F3 0F 59 C0 [0-8] 0F 2F C8 0F 47 C6 3A 87",
     ]},
+    # Struct field offsets (disp32 in the game's code, read from instructions that use them; see "game data
+    # layout" below). The patterns hold on 180836 and on the 2026-10 build, where several fields moved.
+    # cGcPlayer::mCharacterSit (cGcCharacterSit): 0x5540 on 180836
+    "PLAYER_CHARACTER_SIT": {"kind": "value", "known": 0x5540, "range": (0x5000, 0x6000), "sigs": [
+        "E8 ? ? ? ? 48 8B 0E 48 8D 99 # # # # 4C 89 A1",  # cGcPlayer::Release
+        "41 0F 28 C8 E8 ? ? ? ? 49 8D 8F # # # # 41 0F 28 C8",  # cGcPlayer::Update
+        "48 8B 48 10 48 89 8B # # # # 4C 89 B3",  # cGcPlayerThirdPerson::SpawnThirdPersonModel
+    ]},
+    # cGcPlayer::mpPhysicsController: 0x160 on 180836
+    "PLAYER_CONTROLLER": {"kind": "value", "known": 0x160, "range": (0x100, 0x200), "sigs": [
+        "48 85 C0 75 ? 49 8B 87 # # # # 48 85 C0",  # cGcPlayer::Update
+        "EB ? 45 0F 28 F9 49 8B 8C 24 # # # # E8",  # cGcPlayer::CheckFallenThroughFloor
+        "5F C3 48 8B 8F # # # # 48 8B D3 48 8B 89",  # cGcPlayer::GetControllerMatrix
+    ]},
+    # cGcPlayer::mVehicle: 0x168 on 180836
+    "PLAYER_VEHICLE": {"kind": "value", "known": 0x168, "range": (0x100, 0x200), "sigs": [
+        "5B C3 48 8B 8B # # # # 48 89 7C 24 60",  # cGcPlayer::GetMiningBonus
+        "48 83 EC 28 4C 8B 81 # # # # 4C 8D 15",  # cGcPlayer::IsTorchAllowed
+        "83 F9 05 75 ? 48 8B 83 # # # # 48 85 C0",  # cGcPlayer::UpdateAutoSave
+    ]},
+    # cGcPlayer::mGraphicsMatrix: 0x310 on 180836
+    "PLAYER_GRAPHICS_MATRIX": {"kind": "value", "known": 0x310, "range": (0x280, 0x400), "sigs": [
+        "0F 58 DA 0F 29 9D # # # # 0F 29 5D 90",  # cGcPlayer::GetHandTrackingBodyMatrix
+        "0F 59 F3 EB ? 0F 10 A7 # # # # 0F 10 AF",  # cGcPlayer::GetPhysicsMatrix
+        "0F 59 FC EB ? 0F 10 87 # # # # 0F 10 8F",  # cGcPlayer::UpdateTorch
+    ]},
+    # cGcPlayer::mPosition: 0x360 on 180836
+    "PLAYER_POSITION": {"kind": "value", "known": 0x360, "range": (0x280, 0x480), "sigs": [
+        "0F 58 C1 41 0F 11 87 # # # # 45 33 C9",  # cGcPlayer::Update
+        "0F 58 4F 10 0F 11 8B # # # # 0F 10 07",  # cGcPlayer::SetToPosition
+        "44 0F 58 C9 44 0F 29 8D # # # # 0F 10 4E 20",  # cGcPlayer::GetHandTrackingBodyMatrix
+    ]},
+    # cGcPlayer::mLastPosition: 0x33B0 on 180836
+    "PLAYER_LAST_POSITION": {"kind": "value", "known": 0x33B0, "range": (0x3000, 0x3800), "sigs": [
+        "4C 8B C0 48 8D 55 20 49 8D 8F # # # # E8",  # cGcPlayer::Update
+        "41 0F 10 84 24 ? ? ? ? 41 0F 11 84 24 # # # # 41 0F 10 8C 24",  # cGcPlayer::CheckFallenThroughFloor
+        "4C 8B C0 48 8D 95 ? ? ? ? 48 8D 8F # # # # E8 ? ? ? ? 0F 28 95",  # cGcPlayer::UpdateControl
+    ]},
+    # the position last passed to cGcPlayer::SetToPosition: 0x33D0 on 180836
+    "PLAYER_SET_POSITION": {"kind": "value", "known": 0x33D0, "range": (0x3000, 0x3800), "sigs": [
+        "49 8B CF 0F 10 00 41 0F 11 87 # # # # 0F 10 48 10",  # cGcPlayer::Update
+        "45 0F 5C D1 45 0F 11 94 24 # # # # 45 0F 11 8C 24",  # cGcPlayer::CheckFallenThroughFloor
+        "0F 57 C0 0F 11 8F ? ? ? ? 0F 11 B7 # # # # 0F 11 B7",  # cGcPlayer::cGcPlayer
+    ]},
+    # cGcPlayer::mSmoothedPos: 0x3470 on 180836
+    "PLAYER_SMOOTHED_POS": {"kind": "value", "known": 0x3470, "range": (0x3000, 0x3800), "sigs": [
+        "48 8D 55 90 49 8D 8F # # # # 48 8B F0",  # cGcPlayer::Update
+        "E8 ? ? ? ? 0F 28 45 ? 0F 11 86 # # # # 0F 28 4D",  # cGcPlayer::UpdateLooking
+        "0F 28 44 24 30 48 8B CB 0F 11 8B # # # # 0F 11 83",  # cGcPlayer::SetToPosition
+    ]},
+    # cTkHavokCharacterController: its body (what GetPosition reads), 0xC0 on 180836
+    "CONTROLLER_BODY": {"kind": "value", "known": 0xC0, "range": (0x80, 0x140), "sigs": [
+        "57 48 83 EC 70 48 8B 81 # # # # 48 8B D9",  # cTkHavokCharacterController::SetPosition
+        "F3 0F 11 B8 ? ? ? ? 49 8B 8E # # # # 48 8B 85",  # cTkHavokCharacterController::Construct
+        "84 C0 0F 85 ? ? ? ? 48 8B 81 # # # # 48 8B 88",  # cTkHavokCharacterController::Enable
+    ]},
+    # cTkHavokCharacterController::mTargetVelocity: 0xE0 on 180836
+    "CONTROLLER_TARGET_VELOCITY": {"kind": "value", "known": 0xE0, "range": (0x80, 0x180), "sigs": [
+        "0F 28 44 24 50 44 0F 28 B4 24 # # # # 44 0F 28 9C 24",  # cTkHavokCharacterController::applyAction
+        "0F 28 BC 24 ? ? ? ? 41 0F 11 B6 # # # # 41 C6 86 ? ? ? ? 01",  # cTkHavokCharacterController::Construct
+        "C7 81 ? ? ? ? 00 00 00 80 88 91 ? ? ? ? 48 89 91 ? ? ? ? 0F 11 81 # # # # 0F 11 81 ? ? ? ? 0F 28 05",
+        # (the last one: cTkHavokCharacterController::cTkHavokCharacterController)
+    ]},
+    # cTkHavokCharacterController::mbOnGround: 0x104 on 180836
+    "CONTROLLER_ON_GROUND": {"kind": "value", "known": 0x104, "range": (0x80, 0x200), "sigs": [
+        "0F 28 6C 24 40 80 BB # # # # 00 0F 84",  # cTkHavokCharacterController::applyAction
+        "4C 8D 5C 24 70 40 88 B3 # # # # 49 8B 5B 10",  # cTkHavokCharacterController::SetPosition
+        "4C 8D 9C 24 ? ? ? ? C6 83 # # # # 00 49 8B 5B 18",  # cTkHavokCharacterController::Prepare
+    ]},
+    # cTkInputManager's first input port (the array the OpenVR manager copies the poses into): 0x4C0 on 180836
+    "INPUT_PORT": {"kind": "value", "known": 0x4C0, "range": (0x400, 0x800), "sigs": [
+        "BF 06 00 00 00 48 8D 99 # # # # 8B F7",  # cTkInputManager::Clear (loops over the ports)
+        "BA 01 00 00 00 48 8D 8B # # # # 0F 2F C1",  # cTkInputManagerOpenVR::Update
+    ]},
+    # cTkInputPort's device transforms (cTkMatrix44 per device type): 0x340 on 180836. Both patterns are in the
+    # copy constructor; SetDeviceTransform / GetDeviceTransform fold it into an index (0xD * 64) on 180836.
+    "PORT_DEVICE_TRANSFORMS": {"kind": "value", "known": 0x340, "range": (0x280, 0x500), "sigs": [
+        "41 88 ? ? ? 00 00 ? 8D 86 # # # # 0F 10 00 0F 11 01 0F 10 48 10 0F 11 49 10",
+        "48 8B 5C 24 68 49 8D ? # # # #",
+    ]},
+    # cTkHmdOpenVR: the raw HMD pose, 0x2700 on 180836
+    "HMD_POSE": {"kind": "value", "known": 0x2700, "range": (0x2400, 0x2C00), "sigs": [
+        "75 ? E8 ? ? ? ? 0F 10 A7 # # # # 33 C0 0F 10 9F",  # cTkHmdOpenVR::GetViewMatrix
+        "74 ? 0F 10 86 ? ? ? ? 0F 11 86 # # # # 0F 10 8E",  # cTkHmdOpenVR::ProcessPoses
+    ]},
 }
 _RESOLVED = _addr_resolve(ADDRESSES, logger)
 
 # ------------------------------------------------------------------ game data layout ----
-# Verified on build 180836 (offsets come from the 4.13 PDB and were confirmed live, see PLAN.md).
-PLAYER_CHARACTER_SIT = 0x5540  # cGcPlayer::mCharacterSit (cGcCharacterSit)
+# Verified on build 180836 (offsets come from the 4.13 PDB and were confirmed live, see PLAN.md). Offsets of 0x80
+# and up are disp32 in the game's code and are read from it at load (ADDRESSES above, 180836 values in the
+# comments); 0 = not found on this build, and what needs that field stays off (see _FOLLOW_MISSING below). The
+# small ones are disp8 in code and stay constants (unchanged on the 2026-10 build).
+PLAYER_CHARACTER_SIT = _RESOLVED["PLAYER_CHARACTER_SIT"]  # cGcPlayer::mCharacterSit (cGcCharacterSit), 0x5540 on 180836
 SIT_STATE = 0x68  # cGcCharacterSit::meState: 0 standing, 1 sitting down, 2 seated, 3 standing up
 THIRD_PERSON_MESH_NODE = 0x38  # cGcPlayerThirdPerson::mThirdPersonMeshNode - the visible body
 SITTING, SEATED = 1, 2
 # gGcPlayerGlobals.MaximumHorizontalOffsetVR (float, RVA; gGcPlayerGlobals + 0x1578 on 180836), 0 = not found
 MAX_HORIZONTAL_VR = _RESOLVED["MAX_HORIZONTAL_VR"]
-PLAYER_CONTROLLER = 0x160  # cGcPlayer::mpPhysicsController (cTkHavokCharacterController*)
-PLAYER_VEHICLE = 0x168  # cGcPlayer::mVehicle (cTkAttachmentPtr): non-null in a ship, exocraft or mech
-PLAYER_GRAPHICS_MATRIX = 0x310  # cGcPlayer::mGraphicsMatrix (cTkPhysRelMat34: right, up, at, pos local, pos offset)
-PLAYER_POSITION = 0x360  # cGcPlayer::mPosition (cTkVector3, world) - the player's root/head position
-PLAYER_LAST_POSITION = 0x33B0  # cGcPlayer::mLastPosition (cTkPhysRelVec3)
-PLAYER_SET_POSITION = 0x33D0  # the position last passed to SetToPosition (cTkPhysRelVec3)
-PLAYER_SMOOTHED_POS = 0x3470  # cGcPlayer::mSmoothedPos (cTkPhysRelVec3)
-CONTROLLER_ON_GROUND = 0x104  # cTkHavokCharacterController::mbOnGround; SetPosition's bool overwrites it
+# cGcPlayer::mpPhysicsController (cTkHavokCharacterController*), 0x160 on 180836
+PLAYER_CONTROLLER = _RESOLVED["PLAYER_CONTROLLER"]
+# cGcPlayer::mVehicle (cTkAttachmentPtr): non-null in a ship, exocraft or mech; 0x168 on 180836
+PLAYER_VEHICLE = _RESOLVED["PLAYER_VEHICLE"]
+# cGcPlayer::mGraphicsMatrix (cTkPhysRelMat34: right, up, at, pos local, pos offset), 0x310 on 180836
+PLAYER_GRAPHICS_MATRIX = _RESOLVED["PLAYER_GRAPHICS_MATRIX"]
+# cGcPlayer::mPosition (cTkVector3, world) - the player's root/head position; 0x360 on 180836
+PLAYER_POSITION = _RESOLVED["PLAYER_POSITION"]
+PLAYER_LAST_POSITION = _RESOLVED["PLAYER_LAST_POSITION"]  # cGcPlayer::mLastPosition (cTkPhysRelVec3), 0x33B0 on 180836
+# the position last passed to SetToPosition (cTkPhysRelVec3), 0x33D0 on 180836
+PLAYER_SET_POSITION = _RESOLVED["PLAYER_SET_POSITION"]
+PLAYER_SMOOTHED_POS = _RESOLVED["PLAYER_SMOOTHED_POS"]  # cGcPlayer::mSmoothedPos (cTkPhysRelVec3), 0x3470 on 180836
+# cTkHavokCharacterController::mbOnGround; SetPosition's bool overwrites it. 0x104 on 180836
+CONTROLLER_ON_GROUND = _RESOLVED["CONTROLLER_ON_GROUND"]
+# cTkHavokCharacterController's body pointer (null while there is none: GetPosition reads it), 0xC0 on 180836
+CONTROLLER_BODY = _RESOLVED["CONTROLLER_BODY"]
 # The physics controller is placed by its capsule centre, which sits this far below mPosition. Measured on
 # 180836 (a teleport to mPosition lifts the player by exactly this much); the follow checks it each frame.
 CONTROLLER_BELOW_ROOT_M = 0.85
@@ -518,7 +614,8 @@ CONTROLLER_BELOW_ROOT_M = 0.85
 # cGcPlayer::SetFacing(dir) and cGcPlayer::UpdateGraphics(true). Verified against the disassembly on 180836.
 SET_TO_POSITION_CALLS = {"ctrl_set_position": 0xD8, "ctrl_set_velocity": 0xE7, "set_facing": 0x10C,
                          "update_graphics": 0x116}
-CONTROLLER_TARGET_VELOCITY = 0xE0  # cTkHavokCharacterController::mTargetVelocity (SetVelocity writes it)
+# cTkHavokCharacterController::mTargetVelocity (SetVelocity writes it), 0xE0 on 180836
+CONTROLLER_TARGET_VELOCITY = _RESOLVED["CONTROLLER_TARGET_VELOCITY"]
 # Frame order that matters for the follow: IVRCompositor::WaitGetPoses (pose job) -> cTkHmdOpenVR::ProcessPoses
 # (multiplies head and hand poses by the inverse reset matrix, hands go to sTkOpenVRData::mmDeviceTransforms[1..2]
 # with eight RIP-relative movaps stores) -> cTkInputManagerOpenVR::Update copies those into its input ports ->
@@ -529,9 +626,10 @@ CONTROLLER_TARGET_VELOCITY = 0xE0  # cTkHavokCharacterController::mTargetVelocit
 PROCESS_POSES_SIG = "40 55 53 56 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B F1 FF 15"
 MOVAPS_RIP_STORE = rb"\x0f\x29[\x05\x0d\x15\x1d\x25\x2d](....)"
 # cTkInputManagerOpenVR::Update copies them with cTkInputPort::SetDeviceTransform(port, type, available, matrix)
-# into its port at +0x4C0: a 4x4 per device type at port+0x340+64*type (rows right, up, at, position).
-INPUT_PORT = 0x4C0
-PORT_DEVICE_TRANSFORMS = 0x340
+# into its port at +INPUT_PORT: a 4x4 per device type at port+PORT_DEVICE_TRANSFORMS+64*type (rows right, up, at,
+# position). 0x4C0 and 0x340 on 180836.
+INPUT_PORT = _RESOLVED["INPUT_PORT"]
+PORT_DEVICE_TRANSFORMS = _RESOLVED["PORT_DEVICE_TRANSFORMS"]
 HAND_DEVICE_TYPES = (1, 2)  # right, left
 # cTkVector3* cGcPlayer::CalculatePlayerForce(out, bool): the Move stick (after its dead zone) as the world-space
 # walking force, |force| <= 1 (4.13: GetDesiredControllerDir in the camera frame, turned to world). The caller,
@@ -546,7 +644,26 @@ INPUT_UPDATE_SIG = (rb"\x48\x8b\xc4\x53\x41\x54\x48\x81\xec\x88\x00\x00\x00\x48\
 HMD_STATE = 0x10  # eHmdSystemState: 5 = OpenVR running
 HMD_INVERSE_RESET = 0x30  # cTkMatrix44, row vectors: head in body frame = raw pose * this
 HMD_INVERSE_RESET_SET = 0x70  # bool, cleared while a recentre is pending
-HMD_POSE = 0x2700  # cTkMatrix34, raw HMD pose in SteamVR's standing universe
+HMD_POSE = _RESOLVED["HMD_POSE"]  # cTkMatrix34, raw HMD pose in SteamVR's standing universe; 0x2700 on 180836
+
+# A field not found on this build (0) switches off what writes through it, and nothing reads through it; the
+# 180836 values are never guessed on another build. The body follow moves the player through these fields; the
+# view anchor reads the player and its controller; the seat detection reads the game's sit state.
+_FOLLOW_MISSING = [n for n in ("PLAYER_CONTROLLER", "PLAYER_VEHICLE", "PLAYER_GRAPHICS_MATRIX", "PLAYER_POSITION",
+                               "PLAYER_LAST_POSITION", "PLAYER_SET_POSITION", "PLAYER_SMOOTHED_POS",
+                               "CONTROLLER_ON_GROUND", "HMD_POSE") if not globals()[n]]
+_HOLD_MISSING = [n for n in ("PLAYER_CONTROLLER", "PLAYER_VEHICLE", "PLAYER_GRAPHICS_MATRIX", "CONTROLLER_BODY")
+                 if not globals()[n]]
+_PORT_HANDS = bool(INPUT_PORT and PORT_DEVICE_TRANSFORMS)
+if _FOLLOW_MISSING:
+    logger.warning("body follow off: %s not found on this build", ", ".join(_FOLLOW_MISSING))
+if _HOLD_MISSING:
+    logger.warning("view anchor off: %s not found on this build", ", ".join(_HOLD_MISSING))
+if not PLAYER_CHARACTER_SIT:
+    logger.warning("seat handling off: PLAYER_CHARACTER_SIT not found on this build (the sit state is not read)")
+if not _PORT_HANDS:
+    logger.warning("input port hand poses not found on this build: the hands may lag the body by a frame while it "
+                   "follows you")
 
 _k32 = ctypes.WinDLL("kernel32")  # private instance, so the argtypes below don't leak to other mods
 _k32.GetCurrentProcess.restype = ctypes.c_void_p
@@ -956,7 +1073,7 @@ class VRSit(Mod):
         self._force_writes = 0
         self._plan_g = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
         self._head_at_body = (0.0, 0.0, 1.0)
-        self._hold_ok = True
+        self._hold_ok = not _HOLD_MISSING
         self._anchor = None  # world position of the tracking origin the view is held to
         self._hold_base = None
         self._base_hist = []
@@ -1030,21 +1147,22 @@ class VRSit(Mod):
                         target - _internal.BASE_ADDRESS, self._third_person_ptr)
         except Exception:
             logger.exception("body correction unavailable (game code not found)")
-        try:
-            fn = _internal.BASE_ADDRESS + find_pattern_in_binary(SET_TO_POSITION_SIG, False)
-            c = SET_TO_POSITION_CALLS
-            # `mov rcx,[rbx+<mpPhysicsController>]` right before the controller call: layout check
-            if ctypes.string_at(fn + c["ctrl_set_position"] - 13, 7) != b"\x48\x8b\x8b" + PLAYER_CONTROLLER.to_bytes(4, "little"):
-                raise RuntimeError("SetToPosition does not look as expected (game updated?)")
-            t = {k: call_target(fn + v) for k, v in c.items()}
-            self._ctrl_set_position = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint8)(t["ctrl_set_position"])
-            self._set_facing = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)(t["set_facing"])
-            self._update_graphics = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint8)(t["update_graphics"])
-            self._move_ready = True
-            logger.info("body follow ready (from SetToPosition NMS+0x%X: %s)", fn - _internal.BASE_ADDRESS,
-                        {k: "NMS+0x%X" % (v - _internal.BASE_ADDRESS) for k, v in t.items()})
-        except Exception:
-            logger.exception("body follow unavailable (SetToPosition not found)")
+        if not _FOLLOW_MISSING:  # (otherwise the follow stays off; warned at load)
+            try:
+                fn = _internal.BASE_ADDRESS + find_pattern_in_binary(SET_TO_POSITION_SIG, False)
+                c = SET_TO_POSITION_CALLS
+                # `mov rcx,[rbx+<mpPhysicsController>]` right before the controller call: layout check
+                if ctypes.string_at(fn + c["ctrl_set_position"] - 13, 7) != b"\x48\x8b\x8b" + PLAYER_CONTROLLER.to_bytes(4, "little"):
+                    raise RuntimeError("SetToPosition does not look as expected (game updated?)")
+                t = {k: call_target(fn + v) for k, v in c.items()}
+                self._ctrl_set_position = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint8)(t["ctrl_set_position"])
+                self._set_facing = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)(t["set_facing"])
+                self._update_graphics = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint8)(t["update_graphics"])
+                self._move_ready = True
+                logger.info("body follow ready (from SetToPosition NMS+0x%X: %s)", fn - _internal.BASE_ADDRESS,
+                            {k: "NMS+0x%X" % (v - _internal.BASE_ADDRESS) for k, v in t.items()})
+            except Exception:
+                logger.exception("body follow unavailable (SetToPosition not found)")
         self._hand_transforms = []
         try:
             fn = _internal.BASE_ADDRESS + find_pattern_in_binary(PROCESS_POSES_SIG, False)
@@ -1110,7 +1228,7 @@ class VRSit(Mod):
                     if self._anchor_errors < 3:
                         logger.exception("view anchor skipped a frame")
                     self._anchor_errors += 1
-            if arg and self._hmd:  # stats: the camera matrix (previous frame's result) vs the raw HMD motion
+            if arg and self._hmd and HMD_POSE:  # stats: the camera matrix (previous frame's result) vs the raw HMD motion
                 try:
                     v = struct.unpack("20f", ctypes.string_at(int(arg), 80))
                     cam = (v[12] + v[16], v[13] + v[17], v[14] + v[18])
@@ -1131,7 +1249,7 @@ class VRSit(Mod):
         the player has no body or physics controller (loading screens, warps: FootPos would crash then)."""
         tp = safe_read(player + self._third_person_ptr, ctypes.c_uint64) if self._third_person_ptr else None
         ctrl = safe_read(player + PLAYER_CONTROLLER, ctypes.c_uint64)
-        if not tp or not ctrl or not safe_read(ctrl + 0xC0, ctypes.c_uint64):  # GetPosition: controller -> body
+        if not tp or not ctrl or not safe_read(ctrl + CONTROLLER_BODY, ctypes.c_uint64):  # GetPosition: controller -> body
             return None
         buf = (ctypes.c_float * 12)()
         b = (ctypes.addressof(buf) + 15) & ~15
@@ -1423,7 +1541,7 @@ class VRSit(Mod):
         # The hand poses of this frame already carry the old matrix: the shared ones (ProcessPoses' output)
         # and the input port's copies the player update is about to read. Same change for all of them.
         hands = list(self._hand_transforms)
-        if self._input_mgr:
+        if self._input_mgr and _PORT_HANDS:
             hands += [self._input_mgr + INPUT_PORT + PORT_DEVICE_TRANSFORMS + 64 * t for t in HAND_DEVICE_TYPES]
         for addr in hands:
             t = (ctypes.c_float * 16).from_address(addr)
@@ -1612,7 +1730,7 @@ class VRSit(Mod):
         self._pose_dy = RECENTER_INJECT_M if now < st.inject_until else 0.0
         self._player = get_addressof(this)
 
-        sit = safe_read(self._player + PLAYER_CHARACTER_SIT + SIT_STATE, ctypes.c_int32)
+        sit = safe_read(self._player + PLAYER_CHARACTER_SIT + SIT_STATE, ctypes.c_int32) if PLAYER_CHARACTER_SIT else 0
         sit = sit if sit in (0, 1, 2, 3) else 0
         if sit != st.game_sit:
             logger.info("game sit state %d -> %d", st.game_sit, sit)
