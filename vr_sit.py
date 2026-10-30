@@ -35,11 +35,10 @@ import sys
 import time
 from dataclasses import dataclass
 
-import pefile
 import pymhf.core._internal as _internal
 from pymhf import FUNCDEF, Mod, ModState
 from pymhf.core.hooking import manual_hook
-from pymhf.core.memutils import find_pattern_in_binary, get_addressof
+from pymhf.core.memutils import get_addressof
 from pymhf.core.mod_loader import mod_manager
 from pymhf.gui.decorators import BOOLEAN, FLOAT, gui_button, gui_group
 
@@ -221,6 +220,10 @@ _settings_mtime = load_settings()
 # optional masked "prologue", "value": inside "range") and the optional live "check" ("ptr", "vft", "vft:<class>",
 # "u32<N"; a null pointer passes). Nothing found -> 0 and a warning; the caller switches that feature off. Only on
 # the build the "known" values were verified on (180836) is a failed lookup replaced by the known value.
+# Backups for "code" entries, used when the patterns find nothing or disagree (then they pick among the candidates):
+# "vft": ["<class>", <slot>] - the function in that slot of the class's vftable, found through RTTI by the class
+# name (no pattern at all); "nmspy": "<class>::<method>" - NMS.py's own pattern for it (the installed NMS.py, which
+# StartCoop keeps matched to the game). "name" is the function's 4.13 name, for tools/resign.py only.
 import ctypes as _actypes
 import re as _are
 import sys as _asys
@@ -248,7 +251,7 @@ class _AddrImage:
 
     def __init__(self, base: int = 0, path: str = ""):
         import pefile
-        self.base, self._file = base, None
+        self.base, self._file, self._rtti = base, None, {}
         if base:
             head = _addr_peek(base, 0x1000)
             if head is None:
@@ -257,6 +260,7 @@ class _AddrImage:
         else:
             pe = self._file = pefile.PE(path, fast_load=True)
         self.build = (pe.FILE_HEADER.TimeDateStamp, pe.OPTIONAL_HEADER.SizeOfImage)
+        self.image_base = base or pe.OPTIONAL_HEADER.ImageBase  # (what pointers in the data hold)
         self.sections = [(s.Name.rstrip(b"\0").decode(errors="replace"), s.VirtualAddress, s.Misc_VirtualSize,
                           s.Characteristics) for s in pe.sections]
         if base and path:
@@ -431,6 +435,58 @@ def _addr_check(img, spec: dict, v: int):
     return None
 
 
+def _addr_vft(img, cls: str, slot: int) -> int:
+    """RVA of the function in vftable slot `slot` of class `cls` (RTTI: type descriptor -> COL -> vftable), or 0."""
+    key = (cls, slot)
+    if key not in img._rtti:
+        img._rtti[key] = 0
+        secs = {name: (va, size) for name, va, size, _ in img.sections}
+        if ".data" in secs and ".rdata" in secs:
+            dva, dsz = secs[".data"]
+            rva_, rsz = secs[".rdata"]
+            if "_data" not in img._rtti:
+                img._rtti["_data"], img._rtti["_rdata"] = img.read(dva, dsz) or b"", img.read(rva_, rsz) or b""
+            data, rdata = img._rtti["_data"], img._rtti["_rdata"]
+            # pointers in the bytes read: relative to the file's ImageBase when they came from the exe file (also in
+            # the game: read() takes the file for the running build), else to where the image is loaded
+            pbase = img._file.OPTIONAL_HEADER.ImageBase if img._file is not None else img.image_base
+            td = data.find(b".?AV" + cls.encode() + b"@@\0")
+            if td >= 0:
+                td_rva = dva + td - 16
+                for m in _are.finditer(_are.escape(td_rva.to_bytes(4, "little")), rdata):
+                    o = m.start() - 12  # COL: signature 1, offset 0, cdOffset, pTypeDescriptor, ...
+                    if o >= 0 and rdata[o:o + 8] == b"\x01" + b"\0" * 7:
+                        i = rdata.find((pbase + rva_ + o).to_bytes(8, "little"))
+                        if i >= 0:
+                            fn = rdata[i + 8 + 8 * slot:i + 16 + 8 * slot]
+                            if len(fn) == 8:
+                                img._rtti[key] = int.from_bytes(fn, "little") - pbase
+                            break
+    return img._rtti[key]
+
+
+def _addr_nmspy_sig(name: str):
+    """The installed NMS.py's pattern for "<class>::<method>", or None (its source is read, nothing is imported)."""
+    cache = getattr(_asys, "_nms_addr_nmspy_src", None)
+    if cache is None:
+        cache = ""
+        try:
+            import importlib.util
+            import os.path
+            spec = importlib.util.find_spec("nmspy")
+            if spec and spec.origin:
+                with open(os.path.join(os.path.dirname(spec.origin), "data", "types.py"), encoding="utf-8") as f:
+                    cache = f.read()
+        except Exception:
+            pass
+        setattr(_asys, "_nms_addr_nmspy_src", cache)
+    cls, _, meth = name.partition("::")
+    m = _are.search(r"^class " + _are.escape(cls) + r"\(.*?(?=^class |\Z)", cache, _are.M | _are.S)
+    d = m and _are.search(r'function_hook\(\s*(?:signature=)?"([^"]+)"[^\n]*\)\s*\n(?:\s*@\w+[^\n]*\n)*\s*def '
+                          + _are.escape(meth) + r"\(", m.group(0))  # (static ones carry @staticmethod in between)
+    return " ".join("?" if t in ("?", "??") else t for t in d.group(1).split()) if d else None
+
+
 def _addr_lookup(img, spec: dict, env: dict):
     """(value or 0, problem or None, per-pattern notes)."""
     found, notes = set(), []
@@ -444,6 +500,28 @@ def _addr_lookup(img, spec: dict, env: dict):
         notes.append("1" if len(vals) == 1 else f"{len(vals)} values" if vals else "0")
         if len(vals) == 1:
             found |= vals
+    if len(found) != 1 and spec["kind"] == "code":
+        # the backups: a vftable slot by class name, then NMS.py's pattern; each either fills in when nothing was
+        # found or picks one of the disagreeing candidates, and must pass the same checks
+        backups = []
+        if spec.get("vft"):
+            try:
+                backups.append(("vft", _addr_vft(img, spec["vft"][0], spec["vft"][1])))
+            except Exception:
+                backups.append(("vft", 0))
+        if spec.get("nmspy"):
+            sig = _addr_nmspy_sig(spec["nmspy"])
+            try:
+                vals = _addr_scan(img, sig, env) if sig else frozenset()
+            except Exception:
+                vals = frozenset()
+            backups.append(("nmspy", next(iter(vals)) if len(vals) == 1 else 0))
+        for what, v in backups:
+            notes.append(f"{what} {'-' if not v else hex(v)}")
+            if v and (not found or v in found) and not _addr_check(img, spec, v):
+                found = {v}
+                notes.append(f"(by {what})")
+                break
     if not found:
         return 0, "no pattern matched", notes
     if len(found) > 1:
@@ -577,6 +655,74 @@ ADDRESSES = {
         "75 ? E8 ? ? ? ? 0F 10 A7 # # # # 33 C0 0F 10 9F",  # cTkHmdOpenVR::GetViewMatrix
         "74 ? 0F 10 86 ? ? ? ? 0F 11 86 # # # # 0F 10 8E",  # cTkHmdOpenVR::ProcessPoses
     ]},
+    # Game functions the mod hooks or calls (what each is for: see where they are used below). Each has two or more
+    # patterns that hold on 180836 and on the 2026-10 build (its prologue with struct offsets and addresses masked,
+    # and call sites in its callers), or one plus a vftable / NMS.py backup.
+    "PROCESS_POSES": {"kind": "code", "known": 0x2C411D0, "name": "cTkHmdOpenVR::ProcessPoses", "sigs": [
+        "40 55 53 56 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B F1 FF 15",
+        "48 83 B9 ? ? ? ? 00 48 8B D9 74 ? E8 * * * * 8B 0D",
+        "0F 85 ? ? ? ? 80 B9 ? ? ? ? 00 75 ? E8 * * * * 48 8B 0D",
+    ]},
+    "CALC_FORCE": {"kind": "code", "known": 0x1464200, "name": "cGcPlayer::CalculatePlayerForce", "sigs": [
+        "48 89 74 24 18 48 89 7C 24 20 41 56 48 81 EC ? ? ? ? 48 8B F1 45 0F B6 F0 48 8B 0D ? ? ? ? 48 8B FA "
+        "48 81 C1 ? ? ? ? 48 8B 01 FF 90 ? ? ? ? 84 C0 0F 85",
+        "48 8B CF 48 8D B7 ? ? ? ? E8 * * * * 48 8B CF",  # cGcPlayer::UpdateControl
+    ]},
+    # (the second call in it is cTkHmdOpenVR's getter, HMD_GET_INSTANCE)
+    "INPUT_UPDATE": {"kind": "code", "known": 0x2C454B0, "name": "cTkInputManagerOpenVR::Update",
+                     "vft": ["cTkInputManagerOpenVR", 3], "sigs": [
+        "48 8B C4 53 41 54 48 81 EC ? ? ? ? 48 89 68 08 48 8B D9 48 89 70 10 48 89 78 18 4C 89 78 E8 E8 ? ? ? ? "
+        "45 32 FF E8",
+    ]},
+    # (vftable slot 4; the prologue check is the float argument's home store, movss [rsp+10h],xmm1)
+    "CAMERA_UPDATE": {"kind": "code", "known": 0x653A60, "name": "cGcCameraBehaviourFirstPerson::Update",
+                      "vft": ["cGcCameraBehaviourFirstPerson", 4], "prologue": "F3 0F 11 4C 24", "sigs": [
+        "F3 0F 11 4C 24 10 55 56 57 48 8D AC 24",
+    ]},
+    "FOOT_POS": {"kind": "code", "known": 0x1484950, "name": "cGcPlayer::FootPos", "sigs": [
+        "48 89 5C 24 08 57 48 81 EC ? ? ? ? 48 8B 81 ? ? ? ? 48 8B DA 45 32 C0 48 8B F9 48 8B 90 ? ? ? ? "
+        "48 85 D2 74 ? 48 8B 8A ? ? ? ? 48 85 C9 74 ? 48 8B 01 FF 50 30",
+        "48 8B CB 48 8D 55 A0 E8 * * * * 48 63 BB",
+        "48 8D 95 ? ? ? ? 48 81 C1 ? ? ? ? E8 * * * * 0F 10 33",
+    ]},
+    # cTkHmdOpenVR's singleton getter (not in the name maps; the same code as 4.13's, constructing cTkHmdOpenVR):
+    # the "no chairs in VR" check calls it, then tests its state for OpenVR
+    "HMD_GET_INSTANCE": {"kind": "code", "known": 0x1C84D0, "name": "cTkHmdOpenVR::GetInstance", "sigs": [
+        "83 F8 1A 0F 85 ? ? ? ? E8 * * * * 83 78 10 05",  # cGcSimpleInteractionComponent::CanInteract
+        "48 8B F9 75 ? 48 8B 1D ? ? ? ? E8 * * * * 80 BB ? ? ? ? 00",
+        "84 C0 74 ? C6 85 ? ? ? ? 01 E8 * * * * F3 0F 10 35",
+    ]},
+    # the function holding the "no chairs in VR" check (CHAIR_GATE_SIG is looked for inside it)
+    "CAN_INTERACT": {"kind": "code", "known": 0x1068FF0, "name": "cGcSimpleInteractionComponent::CanInteract",
+                     "sigs": [
+        "49 8B 57 08 E8 ? ? ? ? 48 8B D8 48 85 C0 74 ? 48 8B C8 E8 * * * * 84 C0 74 ? 48 8B CB",
+        "4C 8B E9 83 B8 ? ? ? ? 19 0F 84 ? ? ? ? E8 * * * * 84 C0",
+    ]},
+    "HMD_RECENTER": {"kind": "code", "known": 0x2C423B0, "name": "cTkHmdOpenVR::RecenterPose",
+                     "vft": ["cTkHmdOpenVR", 21], "sigs": [
+        "40 53 48 83 EC 20 83 79 10 05 48 8B D9 75 ? 48 8D 0D",
+    ]},
+    "SET_NODE_WORLD": {"kind": "code", "known": 0x2BE3D50, "name": "cTkEngineUtils::SetNodeMatrixWorld", "sigs": [
+        "75 ? 8B 49 08 48 8D 94 24 ? ? ? ? E8 * * * * E9",
+        "0F 29 4C 24 40 8B 49 08 E8 * * * * 44 0F 28 BC 24",
+    ]},
+    "VR_CAMERA_OFFSET": {"kind": "code", "known": 0x145D4A0, "name": "cGcPlayer::GetVRCameraOffset", "sigs": [
+        "48 8B 81 ? ? ? ? 48 85 C0 74 ? F3 0F 10 88 ? ? ? ? 0F 57 C0 0F 2E C8",
+        "48 39 81 ? ? ? ? 0F 84 ? ? ? ? 48 8D 95 ? ? ? ? E8 * * * * 0F 28 8D",
+        "48 8D 54 24 70 48 81 C1 ? ? ? ? E8 * * * * 0F 10 18",
+    ]},
+    "THIRD_PERSON_POST_PHYSICS": {"kind": "code", "known": 0x15203B0, "name": "cGcPlayerThirdPerson::PostPhysicsUpdate",
+                                  "sigs": [
+        "48 8B C4 55 53 57 48 8D A8 ? ? ? ? 48 81 EC ? ? ? ? 0F 29 70 D8 48 8B F9 44 0F 29 58 88",
+        "0F 57 C9 C6 83 ? ? ? ? 01 E8 * * * * 48 8B 8B",
+        "48 8B ? ? ? ? ? 0F 57 C9 C6 ? ? ? ? ? 01 E8 * * * * 48 8B",
+    ]},
+    "SET_TO_POSITION": {"kind": "code", "known": 0x1469C80, "name": "cGcPlayer::SetToPosition",
+                        "nmspy": "cGcPlayer::SetToPosition", "sigs": [
+        "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 60 48 8B FA",
+        "4C 8D 44 24 50 48 8D 54 24 60 E8 * * * * E8",
+        "0F 58 C8 0F 29 4C 24 40 E8 * * * * 48 8B 0D",
+    ]},
 }
 _RESOLVED = _addr_resolve(ADDRESSES, logger)
 
@@ -623,7 +769,7 @@ CONTROLLER_TARGET_VELOCITY = _RESOLVED["CONTROLLER_TARGET_VELOCITY"]
 # cTkInputManagerOpenVR::Update (game thread): it changes the inverse reset matrix, the two hand matrices and the
 # body together, before anyone copies or renders them. (Changing the matrix on the pose job instead made the
 # view flip during turns: the renderer reads it on its own schedule.)
-PROCESS_POSES_SIG = "40 55 53 56 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B F1 FF 15"
+PROCESS_POSES = _RESOLVED["PROCESS_POSES"]  # cTkHmdOpenVR::ProcessPoses (RVA, 0 = not found), 0x2C411D0 on 180836
 MOVAPS_RIP_STORE = rb"\x0f\x29[\x05\x0d\x15\x1d\x25\x2d](....)"
 # cTkInputManagerOpenVR::Update copies them with cTkInputPort::SetDeviceTransform(port, type, available, matrix)
 # into its port at +INPUT_PORT: a 4x4 per device type at port+PORT_DEVICE_TRANSFORMS+64*type (rows right, up, at,
@@ -634,13 +780,8 @@ HAND_DEVICE_TYPES = (1, 2)  # right, left
 # cTkVector3* cGcPlayer::CalculatePlayerForce(out, bool): the Move stick (after its dead zone) as the world-space
 # walking force, |force| <= 1 (4.13: GetDesiredControllerDir in the camera frame, turned to world). The caller,
 # cGcPlayer::UpdateControl, stores it in mCurrentMoveForce and drives the physics controller with it;
-# cGcPlayer::HasMoveForce counts |force|^2 >= 0.001 as moving. Current build: NMS+0x1464200.
-CALC_FORCE_SIG = ("48 89 74 24 18 48 89 7C 24 20 41 56 48 81 EC ? ? ? ? 48 8B F1 45 0F B6 F0 48 8B 0D ? ? ? ? "
-                  "48 8B FA 48 81 C1 ? ? ? ? 48 8B 01 FF 90 ? ? ? ? 84 C0 0F 85")
-# cTkInputManagerOpenVR::Update: prologue, two calls (the second is cTkHmdOpenVR::GetInstance)
-INPUT_UPDATE_SIG = (rb"\x48\x8b\xc4\x53\x41\x54\x48\x81\xec\x88\x00\x00\x00\x48\x89\x68\x08\x48\x8b\xd9\x48\x89\x70\x10"
-                    rb"\x48\x89\x78\x18\x4c\x89\x78\xe8\xe8....\x45\x32\xff\xe8")
-# cTkHmdOpenVR (the game's HMD object, from cTkHmdOpenVR::GetInstance)
+# cGcPlayer::HasMoveForce counts |force|^2 >= 0.001 as moving. NMS+0x1464200 on 180836 (ADDRESSES CALC_FORCE).
+# cTkHmdOpenVR (the game's HMD object, from its getter HMD_GET_INSTANCE)
 HMD_STATE = 0x10  # eHmdSystemState: 5 = OpenVR running
 HMD_INVERSE_RESET = 0x30  # cTkMatrix44, row vectors: head in body frame = raw pose * this
 HMD_INVERSE_RESET_SET = 0x70  # bool, cleared while a recentre is pending
@@ -866,27 +1007,40 @@ _VR_FUNCS = resolve_vr_funcs()  # None on a cold start (VR not up yet) -> the mo
 
 
 # ------------------------------------------------------------------ game code we use ----
-# Simple-interaction availability check, Chair case:
-#   cmp eax,1Ah; jne ...; call <input manager getter>; cmp dword [rax+10h],5 (OpenVR); je <unavailable>
-# The `je` (6 bytes) is NOPed so the normal seat checks run in VR too, and the getter is reused to
-# find the input manager the recentre routine works on.
+# The functions come from ADDRESSES (RVAs, 0 = not found on this build: what needs one stays off, with a warning).
+# Simple-interaction availability check, Chair case (inside cGcSimpleInteractionComponent::CanInteract, CAN_INTERACT):
+#   cmp eax,1Ah; jne ...; call <cTkHmdOpenVR getter>; cmp dword [rax+10h],5 (OpenVR); je <unavailable>
+# The `je` (6 bytes) is NOPed so the normal seat checks run in VR too. The getter (HMD_GET_INSTANCE) gives the HMD
+# object the recentre routine works on.
 CHAIR_GATE_SIG = rb"\x83\xf8\x1a\x0f\x85....\xe8....\x83\x78\x10\x05(?=\x0f\x84|\x66\x0f\x1f\x44\x00\x00)"
 CHAIR_GATE_CALL_OFFSET = 9
 CHAIR_GATE_JE_OFFSET = 18
+CHAIR_GATE_SEARCH = 0x1000  # bytes of CanInteract searched for it (+0x221 in a 0x958-byte function on 180836)
 NOP6 = b"\x66\x0f\x1f\x44\x00\x00"
-# cTkInputManagerOpenVR::Recentre: VR check, IVRChaperone::ResetZeroPose(seated), clears a flag,
+CAN_INTERACT = _RESOLVED["CAN_INTERACT"]
+HMD_GET_INSTANCE = _RESOLVED["HMD_GET_INSTANCE"]
+# cTkHmdOpenVR::RecenterPose: VR check, IVRChaperone::ResetZeroPose(seated), clears a flag,
 # calls the game's recentre handler (HUD flash, body shift, new height reference).
-GAME_RECENTER_SIG = "40 53 48 83 EC 20 83 79 10 05 48 8B D9 75 ? 48 8D 0D"
-# cGcPlayer::UpdateGraphics writes the player's root node with cTkEngineUtils::SetNodeMatrixWorld:
-#   mov ecx,[rbx+0E0h]; mov rdx,rdi; call <SetNodeMatrixWorld>; mov edx,[rbx+0E0h]
-NODE_SET_SITE_SIG = rb"\x8b\x8b\xe0\x00\x00\x00\x48\x8b\xd7\xe8(....)\x8b\x93\xe0\x00\x00\x00"
+HMD_RECENTER = _RESOLVED["HMD_RECENTER"]
+# cTkEngineUtils::SetNodeMatrixWorld(node, matrix): cGcPlayer::UpdateGraphics writes the player's root node with it
+SET_NODE_WORLD = _RESOLVED["SET_NODE_WORLD"]
 # cGcPlayer::GetVRCameraOffset starts with  mov rax,[rcx+<cGcPlayer::mpThirdPerson>]  (0x148 on 180836)
-VR_CAMERA_OFFSET_SIG = "48 8B 81 ? ? ? ? 48 85 C0 74 ? F3 0F 10 88 ? ? ? ? 0F 57 C0 0F 2E C8"
+VR_CAMERA_OFFSET = _RESOLVED["VR_CAMERA_OFFSET"]
 # void cGcPlayerThirdPerson::PostPhysicsUpdate(float) - places the character model every frame
-THIRD_PERSON_POST_PHYSICS_SIG = "48 8B C4 55 53 57 48 8D A8 ? ? ? ? 48 81 EC ? ? ? ? 0F 29 70 D8 48 8B F9 44 0F 29 58 88"
+THIRD_PERSON_POST_PHYSICS = _RESOLVED["THIRD_PERSON_POST_PHYSICS"]
 # void cGcPlayer::SetToPosition(cTkPhysRelVec3* pos, cTkVector3* facing, cTkVector3* velocity) - the
-# game's own player teleport (physics controller, smoothed position, graphics); NMS.py's signature.
-SET_TO_POSITION_SIG = "48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 48 83 EC ? 48 8B FA 48 8B D9 48 8B 15"
+# game's own player teleport (physics controller, smoothed position, graphics)
+SET_TO_POSITION = _RESOLVED["SET_TO_POSITION"]
+for _name, _what in (("CAN_INTERACT", "chairs in VR (the chair check is not patched)"),
+                     ("HMD_GET_INSTANCE", "the automatic recentre and the body follow (no HMD object)"),
+                     ("HMD_RECENTER", "the automatic seat-height recentre"),
+                     ("SET_NODE_WORLD", "the seated-body fix"),
+                     ("VR_CAMERA_OFFSET", "the seated-body fix, the walk correction and the view anchor"),
+                     ("THIRD_PERSON_POST_PHYSICS", "the seated-body fix and the walk correction (hook not placed)"),
+                     ("SET_TO_POSITION", "the body follow"),
+                     ("PROCESS_POSES", "moving the hand poses with the body (the hands may lag it by a frame)")):
+    if not _RESOLVED[_name]:
+        logger.warning("%s not found on this build: %s is off", _name, _what)
 
 
 def call_target(call: int) -> int:
@@ -894,22 +1048,6 @@ def call_target(call: int) -> int:
     if ctypes.string_at(call, 1) != b"\xe8":
         raise RuntimeError(f"no call instruction at 0x{call:X} (game updated?)")
     return call + 5 + ctypes.c_int32.from_address(call + 1).value
-
-
-def ida_to_regex(sig: str) -> bytes:
-    """"48 8B ? C3" -> a regex for find_unique (? = any byte)."""
-    return b"".join(b"." if b == "?" else re.escape(bytes([int(b, 16)])) for b in sig.split())
-
-
-def find_unique(sig: bytes) -> tuple:
-    """(absolute address, match) of a regex signature that must occur exactly once in .text."""
-    pe = pefile.PE(_internal.BINARY_PATH, fast_load=True)
-    text = next(s for s in pe.sections if s.Name.rstrip(b"\0") == b".text")
-    start = _internal.BASE_ADDRESS + text.VirtualAddress
-    hits = list(re.finditer(sig, ctypes.string_at(start, text.Misc_VirtualSize), re.DOTALL))
-    if len(hits) != 1:
-        raise RuntimeError(f"signature matched {len(hits)} times (game updated?)")
-    return start + hits[0].start(), hits[0]
 
 
 def write_code(addr: int, data: bytes) -> None:
@@ -922,89 +1060,24 @@ def write_code(addr: int, data: bytes) -> None:
     k32.FlushInstructionCache(ctypes.c_void_p(-1), ctypes.c_void_p(addr), len(data))
 
 
-def _find_input_update() -> int:
-    """RVA of cTkInputManagerOpenVR::Update, or 0 (the follow then runs from cGcPlayer::Update instead)."""
-    try:
-        addr, _ = find_unique(INPUT_UPDATE_SIG)
-        return addr - _internal.BASE_ADDRESS
-    except Exception:
-        logger.exception("cTkInputManagerOpenVR::Update not found; the hands may lag the body by a frame")
-        return 0
-
-
-_INPUT_UPDATE = _find_input_update()
-
-
-def _find_calc_force() -> int:
-    """RVA of cGcPlayer::CalculatePlayerForce, or 0 (then the follow walks by stick emulation)."""
-    try:
-        addr, _ = find_unique(ida_to_regex(CALC_FORCE_SIG))
-        return addr - _internal.BASE_ADDRESS
-    except Exception:
-        logger.exception("cGcPlayer::CalculatePlayerForce not found; walking by stick emulation instead")
-        return 0
-
-
-_CALC_FORCE = _find_calc_force()
-
-
-def _find_camera_update() -> int:
-    """RVA of cGcCameraBehaviourFirstPerson::Update: slot 4 of the class's vftable, found through its RTTI."""
-    try:
-        pe = pefile.PE(_internal.BINARY_PATH, fast_load=True)
-        base = _internal.BASE_ADDRESS
-        rdata = next(s for s in pe.sections if s.Name.rstrip(b"\0") == b".rdata")
-        data = next(s for s in pe.sections if s.Name.rstrip(b"\0") == b".data")
-        # TypeDescriptor: vftable ptr, spare, ".?AVcGcCameraBehaviourFirstPerson@@"
-        name = b".?AVcGcCameraBehaviourFirstPerson@@\0"
-        blob = ctypes.string_at(base + data.VirtualAddress, data.Misc_VirtualSize)
-        td = blob.find(name)
-        if td < 0:
-            raise RuntimeError("type descriptor not found")
-        td_rva = data.VirtualAddress + td - 16
-        # Complete Object Locator (in .rdata) referencing this type descriptor with offset 0
-        rblob = ctypes.string_at(base + rdata.VirtualAddress, rdata.Misc_VirtualSize)
-        col_rva = 0
-        for mm in re.finditer(re.escape(td_rva.to_bytes(4, "little")), rblob):
-            o = mm.start() - 12  # signature, offset, cdOffset, pTypeDescriptor
-            if o >= 0 and rblob[o:o + 8] == b"\x01\x00\x00\x00\x00\x00\x00\x00":
-                col_rva = rdata.VirtualAddress + o
-                break
-        if not col_rva:
-            raise RuntimeError("complete object locator not found")
-        # the vftable is preceded by a pointer to its COL
-        col_va = (base + col_rva).to_bytes(8, "little")
-        i = rblob.find(col_va)
-        if i < 0:
-            raise RuntimeError("vftable not found")
-        vft = base + rdata.VirtualAddress + i + 8
-        fn = ctypes.c_uint64.from_address(vft + 8 * 4).value
-        if ctypes.string_at(fn, 4) != b"\xf3\x0f\x11\x4c":  # movss [rsp+..],xmm1
-            raise RuntimeError("slot 4 does not look like Update (game updated?)")
-        return fn - base
-    except Exception:
-        logger.exception("cGcCameraBehaviourFirstPerson::Update not found; the view cannot be anchored")
-        return 0
-
-
-_CAMERA_UPDATE = _find_camera_update()
+# RVA of cTkInputManagerOpenVR::Update, or 0 (the follow then runs from cGcPlayer::Update instead)
+_INPUT_UPDATE = _RESOLVED["INPUT_UPDATE"]
+if not _INPUT_UPDATE:
+    logger.warning("cTkInputManagerOpenVR::Update not found; the hands may lag the body by a frame")
+# RVA of cGcPlayer::CalculatePlayerForce, or 0 (then the follow walks by stick emulation)
+_CALC_FORCE = _RESOLVED["CALC_FORCE"]
+if not _CALC_FORCE:
+    logger.warning("cGcPlayer::CalculatePlayerForce not found; walking by stick emulation instead")
+# RVA of cGcCameraBehaviourFirstPerson::Update (slot 4 of the class's vftable), or 0
+_CAMERA_UPDATE = _RESOLVED["CAMERA_UPDATE"]
+if not _CAMERA_UPDATE:
+    logger.warning("cGcCameraBehaviourFirstPerson::Update not found; the view cannot be anchored")
 
 # cTkPhysRelVec3* cGcPlayer::FootPos(out): the physics controller's live position minus 1 m along up (vehicle
 # matrix when riding). In VR the first-person camera is FootPos + GetVRCameraOffset, read after the player update.
-FOOT_POS_SIG = ("48 89 5C 24 08 57 48 81 EC ? ? ? ? 48 8B 81 ? ? ? ? 48 8B DA 45 32 C0 48 8B F9 48 8B 90 ? ? ? ? "
-                "48 85 D2 74 ? 48 8B 8A ? ? ? ? 48 85 C9 74 ? 48 8B 01 FF 50 30")
-
-
-def _find_foot_pos() -> int:
-    try:
-        addr, _ = find_unique(ida_to_regex(FOOT_POS_SIG))
-        return addr
-    except Exception:
-        logger.exception("cGcPlayer::FootPos not found: the view anchor falls back to mPosition")
-        return 0
-
-
-_FOOT_POS = _find_foot_pos()
+_FOOT_POS = _internal.BASE_ADDRESS + _RESOLVED["FOOT_POS"] if _RESOLVED["FOOT_POS"] else 0
+if not _FOOT_POS:
+    logger.warning("cGcPlayer::FootPos not found: the view anchor falls back to mPosition")
 _FOOT_POS_FN = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(_FOOT_POS) if _FOOT_POS else None
 
 
@@ -1124,32 +1197,42 @@ class VRSit(Mod):
                     logger.warning("VR head-height limit at %+d not where expected (read %s); leaving it", off, v)
         except Exception:
             logger.exception("could not lift MaximumHorizontalOffsetVR")
+        self._input_mgr_getter = _internal.BASE_ADDRESS + HMD_GET_INSTANCE if HMD_GET_INSTANCE else 0
         try:
-            gate, _ = find_unique(CHAIR_GATE_SIG)
+            if not CAN_INTERACT:
+                raise RuntimeError("cGcSimpleInteractionComponent::CanInteract not found on this build")
+            fn = _internal.BASE_ADDRESS + CAN_INTERACT
+            hits = list(re.finditer(CHAIR_GATE_SIG, ctypes.string_at(fn, CHAIR_GATE_SEARCH), re.DOTALL))
+            if len(hits) != 1:
+                raise RuntimeError(f"the chair check matched {len(hits)} times in CanInteract (game updated?)")
+            gate = fn + hits[0].start()
+            if self._input_mgr_getter and call_target(gate + CHAIR_GATE_CALL_OFFSET) != self._input_mgr_getter:
+                raise RuntimeError("the chair check calls another function than cTkHmdOpenVR's getter (game updated?)")
             self._chair_je = gate + CHAIR_GATE_JE_OFFSET
             self._apply_chair_gate()
-            call = gate + CHAIR_GATE_CALL_OFFSET
-            self._input_mgr_getter = call + 5 + ctypes.c_int32.from_address(call + 1).value
         except Exception:
             logger.exception("chair VR gate patch failed")
+        self._game_recenter = _internal.BASE_ADDRESS + HMD_RECENTER if HMD_RECENTER else 0
         try:
-            self._game_recenter = _internal.BASE_ADDRESS + find_pattern_in_binary(GAME_RECENTER_SIG, False)
-        except Exception:
-            logger.exception("game recentre routine not found")
-        try:
-            site, _ = find_unique(NODE_SET_SITE_SIG)
-            call = site + 9
-            target = call + 5 + ctypes.c_int32.from_address(call + 1).value
-            self._set_node_world = ctypes.CFUNCTYPE(None, ctypes.c_uint32, ctypes.c_void_p)(target)
-            fn = _internal.BASE_ADDRESS + find_pattern_in_binary(VR_CAMERA_OFFSET_SIG, False)
+            if not VR_CAMERA_OFFSET:
+                raise RuntimeError("cGcPlayer::GetVRCameraOffset not found on this build")
+            fn = _internal.BASE_ADDRESS + VR_CAMERA_OFFSET
+            if ctypes.string_at(fn, 3) != b"\x48\x8b\x81":  # mov rax,[rcx+disp32]: the offset is read from it
+                raise RuntimeError("GetVRCameraOffset does not start as expected (game updated?)")
             self._third_person_ptr = ctypes.c_int32.from_address(fn + 3).value
+            if not SET_NODE_WORLD:
+                raise RuntimeError("cTkEngineUtils::SetNodeMatrixWorld not found on this build")
+            target = _internal.BASE_ADDRESS + SET_NODE_WORLD
+            self._set_node_world = ctypes.CFUNCTYPE(None, ctypes.c_uint32, ctypes.c_void_p)(target)
             logger.info("body correction ready (SetNodeMatrixWorld NMS+0x%X, player->third person +0x%X)",
                         target - _internal.BASE_ADDRESS, self._third_person_ptr)
         except Exception:
             logger.exception("body correction unavailable (game code not found)")
         if not _FOLLOW_MISSING:  # (otherwise the follow stays off; warned at load)
             try:
-                fn = _internal.BASE_ADDRESS + find_pattern_in_binary(SET_TO_POSITION_SIG, False)
+                if not SET_TO_POSITION:
+                    raise RuntimeError("cGcPlayer::SetToPosition not found on this build")
+                fn = _internal.BASE_ADDRESS + SET_TO_POSITION
                 c = SET_TO_POSITION_CALLS
                 # `mov rcx,[rbx+<mpPhysicsController>]` right before the controller call: layout check
                 if ctypes.string_at(fn + c["ctrl_set_position"] - 13, 7) != b"\x48\x8b\x8b" + PLAYER_CONTROLLER.to_bytes(4, "little"):
@@ -1165,7 +1248,9 @@ class VRSit(Mod):
                 logger.exception("body follow unavailable (SetToPosition not found)")
         self._hand_transforms = []
         try:
-            fn = _internal.BASE_ADDRESS + find_pattern_in_binary(PROCESS_POSES_SIG, False)
+            if not PROCESS_POSES:
+                raise RuntimeError("cTkHmdOpenVR::ProcessPoses not found on this build")
+            fn = _internal.BASE_ADDRESS + PROCESS_POSES
             code = ctypes.string_at(fn, 0x1200)
             targets = sorted({fn + mm.end() + int.from_bytes(mm.group(1), "little", signed=True)
                               for mm in re.finditer(MOVAPS_RIP_STORE, code, re.DOTALL)})
@@ -1805,7 +1890,7 @@ class VRSit(Mod):
         return st.head_peak[0] - st.hmd_pos[1] >= SIT_DROP_M
 
     # ------------------------------------------------------------- the seated VR body ----
-    @manual_hook("cGcPlayerThirdPerson::PostPhysicsUpdate", pattern=THIRD_PERSON_POST_PHYSICS_SIG,
+    @manual_hook("cGcPlayerThirdPerson::PostPhysicsUpdate", offset=THIRD_PERSON_POST_PHYSICS or None,
                  func_def=FUNCDEF(None, [ctypes.c_void_p, ctypes.c_float]), detour_time="after")
     def after_body_placed(self, this, lfStep):
         if not self._live():
